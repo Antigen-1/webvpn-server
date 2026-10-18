@@ -1,0 +1,13 @@
+.venv/
+build/
+compiled/
+**/compiled/
+.tmp/
+doc/
+__pycache__/
+*.pyc
+*.zo
+*.dep
+webvpn.json
+cert.pem
+key.pem

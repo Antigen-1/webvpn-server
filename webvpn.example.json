@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy to webvpn.json beside webvpn-server(.exe), or simply run `webvpn-server init`. Generate the user hash with `webvpn-server hash-password` and replace the placeholder below.",
+  "_comment_hsts": "The self-signed certificate `init` makes is not trusted by a browser; keep hsts false until a CA certificate is installed.",
+  "host": "127.0.0.1",
+  "port": 8443,
+  "cert_file": "cert.pem",
+  "key_file": "key.pem",
+  "session_ttl": 28800,
+  "login_max_attempts": 5,
+  "login_window": 300,
+  "max_body": 16777216,
+  "max_response": 33554432,
+  "upstream_timeout": 30,
+  "trust_proxy": false,
+  "verify_upstream_tls": true,
+  "hsts": false,
+  "users": {
+    "admin": "REPLACE_WITH_OUTPUT_OF_webvpn-server_hash-password"
+  },
+  "targets": [
+    {
+      "name": "wiki",
+      "label": "内部 Wiki",
+      "url": "http://10.0.0.10:8080"
+    }
+  ]
+}
