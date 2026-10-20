@@ -1,6 +1,7 @@
 {
   "_comment": "Copy to webvpn.json beside webvpn-server(.exe), or simply run `webvpn-server init`. Generate the user hash with `webvpn-server hash-password` and replace the placeholder below.",
   "_comment_hsts": "The self-signed certificate `init` makes is not trusted by a browser; keep hsts false until a CA certificate is installed.",
+  "_comment_headers": "blocked_* arrays are regular expressions matched against the whole header name, case-insensitively. Built-in hop-by-hop/security headers always apply.",
   "host": "127.0.0.1",
   "port": 8443,
   "cert_file": "cert.pem",
@@ -14,6 +15,8 @@
   "trust_proxy": false,
   "verify_upstream_tls": true,
   "hsts": false,
+  "blocked_request_headers": [],
+  "blocked_response_headers": [],
   "users": {
     "admin": "REPLACE_WITH_OUTPUT_OF_webvpn-server_hash-password"
   },

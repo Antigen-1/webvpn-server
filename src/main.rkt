@@ -31,7 +31,7 @@
     (define init-config (object-get-attr config "init_config"))
     (define hash-password (object-get-attr auth "hash_password"))
 
-    (define version-text "webvpn-server 0.0.1")
+    (define version-text "webvpn-server 0.0.2")
 
     (define (make-parser)
       (define parser

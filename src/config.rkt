@@ -89,6 +89,8 @@
     (define default-cert-name "cert.pem")
     (define default-key-name "key.pem")
     (define max-targets 64)
+    (define max-header-patterns 64)
+    (define max-header-pattern-length 256)
 
     (define (config-error message)
       (raise (+ "配置错误: " message)))
@@ -271,6 +273,45 @@
       (object-set! seen name #t)
       (normalize-targets-entries raw seen (+ result (list target)) (+ index 1)))
 
+    ;; ---- extensible header blacklists
+    ;;
+    ;; Both lists are arrays of regular expressions, matched against the whole
+    ;; lower-cased header name.  The built-in hop-by-hop and security list in
+    ;; proxy.rkt always applies; these only add to it.
+
+    (define (normalize-header-patterns raw key)
+      (define value (raw-value raw key (list)))
+      (if (not (list-value? value))
+          (config-error (+ key " 必须是正则表达式字符串数组"))
+          (if (> (len value) max-header-patterns)
+              (config-error (+ key " 最多 " (str max-header-patterns) " 项"))
+              (normalize-header-patterns-list value key 0 (list) (list)))))
+
+    (define (normalize-header-patterns-list value key index strings compiled)
+      (if (>= index (len value))
+          (list strings compiled)
+          (normalize-header-pattern-one value key index strings compiled)))
+
+    (define (normalize-header-pattern-one value key index strings compiled)
+      (define pattern (object-ref value index))
+      (if (or (not (text-value? pattern))
+              (= (len pattern) 0)
+              (> (len pattern) max-header-pattern-length))
+          (config-error (+ key " 第 " (str (+ index 1))
+                           " 项必须是非空字符串（最多 "
+                           (str max-header-pattern-length) " 个字符）"))
+          (normalize-header-pattern-compile value key index strings compiled pattern)))
+
+    (define (normalize-header-pattern-compile value key index strings compiled pattern)
+      (define compiled-pattern
+        (with-handler
+         (lambda (e)
+           (config-error (+ key " 第 " (str (+ index 1)) " 项不是合法正则")))
+         ((object-get-attr re "compile") pattern (object-get-attr re "IGNORECASE"))))
+      (normalize-header-patterns-list value key (+ index 1)
+                                      (+ strings (list pattern))
+                                      (+ compiled (list compiled-pattern))))
+
     ;; ---- the whole file
 
     (define (normalize-config raw config-path)
@@ -305,6 +346,12 @@
       (object-set! config "verify_upstream_tls"
                    (bool-field raw "verify_upstream_tls" #t "verify_upstream_tls"))
       (object-set! config "hsts" (bool-field raw "hsts" #t "hsts"))
+      (define request-patterns (normalize-header-patterns raw "blocked_request_headers"))
+      (define response-patterns (normalize-header-patterns raw "blocked_response_headers"))
+      (object-set! config "blocked_request_headers" (object-ref request-patterns 0))
+      (object-set! config "blocked_request_header_patterns" (object-ref request-patterns 1))
+      (object-set! config "blocked_response_headers" (object-ref response-patterns 0))
+      (object-set! config "blocked_response_header_patterns" (object-ref response-patterns 1))
       (object-set! config "users" (normalize-users (raw-value raw "users" (dict))))
       (object-set! config "targets" (normalize-targets (raw-value raw "targets" (list))))
       (validate-host (object-ref config "host") config))
@@ -487,6 +534,8 @@
       (object-set! raw "trust_proxy" #f)
       (object-set! raw "verify_upstream_tls" #t)
       (object-set! raw "hsts" #t)
+      (object-set! raw "blocked_request_headers" (list))
+      (object-set! raw "blocked_response_headers" (list))
       (define users (dict))
       (object-set! users "admin" encoded)
       (object-set! raw "users" users)

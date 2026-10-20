@@ -8,6 +8,7 @@ TLS end-to-end test lives in integration_client.py.
 
 import gzip
 import json
+import re
 import os
 import shutil
 import sys
@@ -187,7 +188,7 @@ def test_proxy():
         ],
         "body": b'<a href="/x">x</a>',
     }
-    rewritten = proxy.rewrite_response(result, wiki, index, False, namespace)
+    rewritten = proxy.rewrite_response(result, wiki, index, False, namespace, [])
     assert rewritten["body"] == b'<a href="/proxy/wiki/x">x</a>'
     headers = dict(rewritten["headers"])
     assert headers["location"] == "/proxy/wiki/next"
@@ -197,9 +198,59 @@ def test_proxy():
     gz = dict(result)
     gz["body"] = gzip.compress(b'<a href="/gzip">g</a>')
     gz["headers"] = [("Content-Type", "text/html"), ("Content-Encoding", "gzip")]
-    rewritten = proxy.rewrite_response(gz, wiki, index, False, namespace)
+    rewritten = proxy.rewrite_response(gz, wiki, index, False, namespace, [])
     assert b"/proxy/wiki/gzip" in rewritten["body"]
     assert "content-encoding" not in dict(rewritten["headers"])
+
+
+def test_headers():
+    wiki = target("wiki")
+    namespace = "abcd1234"
+    patterns = [re.compile("x-secret-.*", re.IGNORECASE)]
+    incoming = [
+        ("Accept", "text/html"),
+        ("X-Custom-Header", "kept"),
+        ("X-Secret-Token", "drop"),
+        ("Host", "evil.example"),
+        ("Cookie", "wv_abcd1234_wiki_sid=abc"),
+        ("Connection", "X-Hop-Header"),
+        ("X-Hop-Header", "drop"),
+        ("X-Forwarded-For", "6.6.6.6"),
+        ("X-Forwarded-Custom", "6.6.6.6"),
+        ("Content-Length", "999"),
+        ("Accept-Encoding", "gzip"),
+    ]
+    headers = proxy.filter_request_headers(incoming, wiki, namespace, patterns)
+    assert headers["accept"] == "text/html"
+    assert headers["x-custom-header"] == "kept"
+    assert headers["Host"] == wiki["netloc"]
+    assert headers["Accept-Encoding"] == "identity"
+    assert headers["Cookie"] == "sid=abc"
+    for blocked in [
+        "x-secret-token",
+        "host",
+        "cookie",
+        "x-hop-header",
+        "x-forwarded-for",
+        "x-forwarded-custom",
+        "content-length",
+        "accept-encoding",
+        "connection",
+    ]:
+        assert blocked not in headers
+
+    result = {
+        "status": 200,
+        "reason": "OK",
+        "headers": [("Content-Type", "text/plain"), ("X-Private", "yes")],
+        "body": b"ok",
+    }
+    rewritten = proxy.rewrite_response(
+        result, wiki, proxy.target_index([wiki]), False, namespace,
+        [re.compile("x-private", re.IGNORECASE)],
+    )
+    assert "x-private" not in dict(rewritten["headers"])
+    assert dict(rewritten["headers"])["content-type"] == "text/plain"
 
 
 def test_config():
@@ -216,6 +267,8 @@ def test_config():
             "port": 8443,
             "cert_file": "cert.pem",
             "key_file": "key.pem",
+            "blocked_request_headers": ["x-secret-.*"],
+            "blocked_response_headers": ["x-private"],
             "users": {"admin": encoded},
             "targets": [{"name": "wiki", "label": "Wiki", "url": "http://127.0.0.1:8000"}],
         }
@@ -226,6 +279,10 @@ def test_config():
         assert loaded["cert_file"] == cert
         assert loaded["key_file"] == key
         assert loaded["targets"][0]["name"] == "wiki"
+        assert loaded["blocked_request_headers"] == ["x-secret-.*"]
+        assert loaded["blocked_response_headers"] == ["x-private"]
+        assert len(loaded["blocked_request_header_patterns"]) == 1
+        assert loaded["blocked_request_header_patterns"][0].fullmatch("X-SECRET-TOKEN")
         config.check_config(loaded)
 
         config.apply_overrides(loaded, "0.0.0.0", 9443, None, None)
@@ -235,6 +292,12 @@ def test_config():
             os.chmod(key, 0o644)
             raises(lambda: config.check_config(loaded), "权限")
             os.chmod(key, 0o600)
+
+        bad = dict(raw)
+        bad["blocked_request_headers"] = ["("]
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(bad, stream)
+        raises(lambda: config.load_config(path), "正则")
 
         bad = dict(raw)
         bad["targets"] = [{"name": "bad name", "label": "x", "url": "http://127.0.0.1"}]
@@ -281,6 +344,7 @@ def test_config():
 def main():
     test_util()
     test_auth()
+    test_headers()
     test_proxy()
     test_config()
     print("behavior ok")

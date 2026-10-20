@@ -151,6 +151,9 @@ PBKDF2 哈希。@tt{check} 校验 JSON、用户哈希、target origin 与证书/
         内网自签名上游才考虑关闭。}
   @item{@tt{hsts}（默认 @tt{true}）：是否发送 HSTS。使用自签名证书时建议
         先设为 @tt{false}，换 CA 证书后再打开。}
+  @item{@tt{blocked_request_headers}、@tt{blocked_response_headers}（默认
+        @tt{[]}）：正则表达式数组，用来扩展内置的请求/响应头黑名单。对完整头名
+        做大小写不敏感匹配，例如 @tt{"x-internal-.*"}。}
   @item{@tt{users}：对象，键是用户名，值是 @tt{hash-password} 的输出。
         @tt{init} 会创建 @tt{admin}。}
   @item{@tt{targets}：数组，每项有 @tt{name}（匹配
@@ -161,6 +164,41 @@ PBKDF2 哈希。@tt{check} 校验 JSON、用户哈希、target origin 与证书/
 未知字段会被忽略；示例配置里的 @tt{_comment} 字段就是这种用途。配置文件本身
 含密码哈希，@tt{init} 以 @tt{0600} 写入；私钥同样以 @tt{0600} 写入，服务启动
 时会检查。
+
+@subsection{Header 黑名单}
+
+请求和响应都采用“默认转发，黑名单排除”的机制。内置黑名单始终生效，
+配置里的 @tt{blocked_request_headers} 和 @tt{blocked_response_headers} 只追加
+规则，不能取消内置规则。
+
+@itemlist[
+  @item{请求方向：默认转发所有未被黑名单命中的头，因此 @tt{Authorization}、
+        @tt{Content-Type}、@tt{Range}、@tt{If-*}、@tt{Origin}、@tt{Referer}、
+        @tt{User-Agent} 等会自动通过。}
+  @item{请求内置黑名单：@tt{Host}、@tt{Cookie}、@tt{Content-Length}、
+        @tt{Accept-Encoding}、@tt{Expect}、逐跳头（@tt{Connection}、
+        @tt{Keep-Alive}、@tt{TE}、@tt{Trailer}、@tt{Transfer-Encoding}、
+        @tt{Upgrade}、@tt{Proxy-*}），以及 @tt{Forwarded}、@tt{Via}、
+        @tt{X-Forwarded-*}、@tt{X-Real-IP}。@tt{Connection} 头里点名的其它头
+        也会被动态加入本次请求的黑名单。}
+  @item{响应方向：默认转发所有未被黑名单命中的头；内置黑名单包括逐跳头、
+        @tt{Server}、@tt{Date}、@tt{Alt-Svc}、@tt{Via}、HSTS、CSP 等。
+        配置黑名单先检查：命中的头直接丢弃；未命中的 @tt{Set-Cookie} 和
+        @tt{Location} 再经过重写。}
+  @item{正则匹配的是完整头名，大小写不敏感；规则写成 @tt{"x-internal-.*"} 时
+        能匹配 @tt{X-Internal-Token}，写成 @tt{"token"} 不会匹配
+        @tt{x-debug-token}，因为必须完整匹配。}
+]
+
+示例：
+
+@verbatim|{
+"blocked_request_headers": ["x-debug-.*", "x-internal-token"],
+"blocked_response_headers": ["x-upstream-secret"]
+}|
+
+配置在加载时编译正则；非法正则、空字符串、超过 64 条或单条超过 256 个字符都会
+让 @tt{load-config} / @tt{check} 失败，而不是在请求时才报错。
 
 @section{Command line 命令行}
 
@@ -235,8 +273,12 @@ webvpn-server hash-password
         编码后的穿越形式。}
   @item{请求/响应：请求体流式读取并在 @tt{max_body} 处截断，上游响应在
         @tt{max_response} 处截断，连接和读取有超时。}
-  @item{头部：响应头名称校验、值去掉 CR/LF；逐跳头丢弃；代理请求只转发允许列表
-        中的头，@tt{Host} 固定为目标 origin，@tt{Accept-Encoding: identity}。}
+  @item{头部：响应头名称校验、值去掉 CR/LF；逐跳头丢弃；代理请求默认转发所有
+        未被黑名单命中的头，内置黑名单还会动态包含 @tt{Connection} 点名的头；
+        客户端的 @tt{Forwarded}、@tt{X-Forwarded-*}、@tt{X-Real-IP}、@tt{Via}
+        默认被丢弃，@tt{Host} 固定为目标 origin，@tt{Accept-Encoding: identity}。
+        @tt{blocked_request_headers} / @tt{blocked_response_headers} 可追加正则
+        规则，非法正则会在启动/检查时被拒绝。}
   @item{错误：客户端只看到通用错误页，堆栈和上游细节只写 stderr；访问日志关闭，
         只记录登录/退出/代理错误，不记录查询字符串和令牌。}
 ]

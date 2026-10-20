@@ -59,10 +59,30 @@
     (define scheme-pattern
       ((object-get-attr re "compile") "^[A-Za-z][A-Za-z0-9+.-]*:"))
 
-    (define forwarded-headers
-      (list "accept" "accept-language" "authorization" "content-type" "range"
-            "if-match" "if-none-match" "if-modified-since" "if-unmodified-since"
-            "if-range" "user-agent" "referer" "origin"))
+    ;; Always blocked on the request path, before the extensible patterns.
+    ;; Hop-by-hop headers, headers this proxy owns, and headers a client must
+    ;; not be able to forge towards an upstream.
+    (define builtin-blocked-request-headers
+      (list "host" "cookie" "content-length" "accept-encoding"
+            "connection" "keep-alive" "proxy-authenticate" "proxy-authorization"
+            "proxy-connection" "te" "trailer" "transfer-encoding" "upgrade"
+            "expect" "forwarded" "via"
+            "x-forwarded-for" "x-forwarded-host" "x-forwarded-proto"
+            "x-forwarded-port" "x-forwarded-server" "x-real-ip"))
+
+    (define (builtin-blocked-request-header? name)
+      (or (in name builtin-blocked-request-headers)
+          (text-startswith? name "x-forwarded-")))
+
+    (define (header-blocked-by-pattern? name patterns)
+      (header-blocked-by-pattern-loop name patterns 0))
+
+    (define (header-blocked-by-pattern-loop name patterns index)
+      (if (>= index (len patterns))
+          #f
+          (if (some? ((object-get-attr (object-ref patterns index) "fullmatch") name))
+              #t
+              (header-blocked-by-pattern-loop name patterns (+ index 1)))))
 
     ;; ---- target index
 
@@ -366,16 +386,39 @@
       (tuple (map (lambda (pair) (incoming-header result pair)) headers))
       result)
 
-    (define (copy-forwarded-header incoming result name)
-      (if (in name incoming)
-          (object-set! result name (object-ref incoming name))
+    (define (add-connection-token result token)
+      (define name (text-strip (text-lower token)))
+      (if (> (len name) 0)
+          (object-set! result name #t)
           None))
 
-    (define (filter-request-headers headers target namespace)
+    ;; RFC 7230: Connection lists headers that are hop-by-hop for this hop,
+    ;; even if their names are not in the fixed list above.
+    (define (connection-blocked-headers incoming)
+      (define result (dict))
+      (define value ((object-get-attr incoming "get") "connection" None))
+      (if (some? value)
+          (tuple (map (lambda (token) (add-connection-token result token))
+                      (text-split value ",")))
+          None)
+      result)
+
+    (define (forward-incoming-header incoming result name connection-blocked patterns)
+      (if (or (builtin-blocked-request-header? name)
+              (in name connection-blocked)
+              (header-blocked-by-pattern? name patterns))
+          None
+          (object-set! result name (object-ref incoming name))))
+
+    (define (filter-request-headers headers target namespace blocked-patterns)
       (define incoming (header-list-to-dict headers))
       (define result (dict))
-      (tuple (map (lambda (name) (copy-forwarded-header incoming result name))
-                  forwarded-headers))
+      (define connection-blocked (connection-blocked-headers incoming))
+      (define names (tuple ((object-get-attr incoming "keys"))))
+      (tuple (map (lambda (name)
+                    (forward-incoming-header incoming result name
+                                             connection-blocked blocked-patterns))
+                  names))
       (object-set! result "Host" (object-ref target "netloc"))
       (object-set! result "Accept-Encoding" "identity")
       (define cookie (request-cookie-header ((object-get-attr incoming "get") "cookie" None)
@@ -515,10 +558,11 @@
       (define rewritten (rewrite-set-cookie value target namespace))
       (if (none? rewritten) (list) (list (list "set-cookie" (header-safe rewritten)))))
 
-    (define (rewrite-one-header header target index head? namespace)
+    (define (rewrite-one-header header target index head? namespace blocked-patterns)
       (define name (text-lower (object-ref header 0)))
       (define value (object-ref header 1))
       (cond
+        [(header-blocked-by-pattern? name blocked-patterns) (list)]
         [(= name "set-cookie") (rewrite-set-cookie-header value target namespace)]
         [(= name "location")
          (list (list "location" (header-safe (rewrite-location value target index))))]
@@ -531,11 +575,13 @@
         [(header-name? name) (list (list name (header-safe value)))]
         [else (list)]))
 
-    (define (rewrite-headers headers index target target-index head? namespace)
+    (define (rewrite-headers headers index target target-index head? namespace blocked-patterns)
       (if (>= index (len headers))
           (list)
-          (+ (rewrite-one-header (object-ref headers index) target target-index head? namespace)
-             (rewrite-headers headers (+ index 1) target target-index head? namespace))))
+          (+ (rewrite-one-header (object-ref headers index) target target-index head? namespace
+                                 blocked-patterns)
+             (rewrite-headers headers (+ index 1) target target-index head? namespace
+                              blocked-patterns))))
 
     (define (rewrite-body body headers target index head? status)
       (define kind (media-kind headers))
@@ -550,7 +596,7 @@
                             (rewrite-css text target index)))
       (encode-charset rewritten charset))
 
-    (define (rewrite-response result target index head? namespace)
+    (define (rewrite-response result target index head? namespace blocked-patterns)
       (define status (object-ref result "status"))
       (define headers (object-ref result "headers"))
       (define body (if head?
@@ -560,7 +606,8 @@
       (define answer (dict))
       (object-set! answer "status" status)
       (object-set! answer "reason" (object-ref result "reason"))
-      (object-set! answer "headers" (rewrite-headers headers 0 target index head? namespace))
+      (object-set! answer "headers"
+                   (rewrite-headers headers 0 target index head? namespace blocked-patterns))
       (object-set! answer "body" rewritten-body)
       answer)
     ))

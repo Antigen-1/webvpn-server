@@ -10,6 +10,11 @@ The server logic is written in Racket's LE and compiled to Python by
 (FastAPI, Uvicorn, the standard library); FastAPI/Uvicorn are a thin ASGI/TLS
 adapter, while authentication, sessions, the portal and the proxy stay in Racket.
 
+Request and response headers use a default-forward blacklist: built-in
+hop-by-hop/security names always apply, and `blocked_request_headers` /
+`blocked_response_headers` add case-insensitive regular expressions matched
+against the whole header name.
+
 ## Quick start
 
 ```sh

@@ -441,7 +441,9 @@
       (define config (object-ref app "config"))
       (define method (to-text (object-ref info "method")))
       (define head? (= method "HEAD"))
-      (define headers (proxy.filter-request-headers (object-ref info "headers") target namespace))
+      (define headers
+        (proxy.filter-request-headers (object-ref info "headers") target namespace
+                                      (object-ref config "blocked_request_header_patterns")))
       (define result
         (with-handler (lambda (e) (capture-error info e))
                       (proxy.fetch-upstream target method request-target headers body
@@ -457,7 +459,8 @@
       (define rewritten
         (with-handler (lambda (e) (capture-error info e))
                       (proxy.rewrite-response result target
-                                              (object-ref app "index") head? namespace)))
+                                              (object-ref app "index") head? namespace
+                                              (object-ref config "blocked_response_header_patterns"))))
       (if (in "error" rewritten)
           (proxy-error-answer config info rewritten)
           (proxy-answer config rewritten head?)))

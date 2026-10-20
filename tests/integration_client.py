@@ -77,6 +77,9 @@ class Upstream(BaseHTTPRequestHandler):
             ])
         elif self.path == "/json":
             self._send(200, b'{"ok":true}', "application/json")
+        elif self.path == "/headers":
+            data = json.dumps(dict(self.headers.items())).encode("utf-8")
+            self._send(200, data, "application/json", headers=[("X-Private", "yes")])
         elif self.path == "/big":
             self._send(200, b"x" * 100000, "text/plain")
         else:
@@ -189,6 +192,8 @@ def main():
         raw["login_max_attempts"] = 3
         raw["max_body"] = 65536
         raw["max_response"] = 10000
+        raw["blocked_request_headers"] = ["x-secret-.*"]
+        raw["blocked_response_headers"] = ["x-private"]
         raw["targets"] = [
             {"name": "up", "label": "内部测试站", "url": f"http://127.0.0.1:{upstream_port}"}
         ]
@@ -323,6 +328,27 @@ def main():
         assert response.status == 200
         assert response.getheader("content-type") == "application/json"
         assert data == b'{"ok":true}'
+
+        response, data, _ = client.request(
+            "GET", "/proxy/up/headers",
+            headers={
+                "X-Custom-Header": "kept",
+                "X-Secret-Token": "drop",
+                "X-Forwarded-For": "6.6.6.6",
+                "Connection": "X-Hop-Header",
+                "X-Hop-Header": "drop",
+            },
+        )
+        assert response.status == 200
+        seen = {key.lower(): value for key, value in json.loads(data).items()}
+        assert seen["x-custom-header"] == "kept"
+        assert "x-secret-token" not in seen
+        assert "x-forwarded-for" not in seen
+        assert "x-hop-header" not in seen
+        assert seen["accept-encoding"] == "identity"
+        assert seen["host"] == f"127.0.0.1:{upstream_port}"
+        assert seen["cookie"] == "sid=upstream"
+        assert response.getheader("x-private") is None
 
         response, data, _ = client.request("GET", "/proxy/up/big")
         assert response.status == 502
