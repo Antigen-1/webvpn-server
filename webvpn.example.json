@@ -2,6 +2,7 @@
   "_comment": "Copy to webvpn.json beside webvpn-server(.exe), or simply run `webvpn-server init`. Generate the user hash with `webvpn-server hash-password` and replace the placeholder below.",
   "_comment_hsts": "The self-signed certificate `init` makes is not trusted by a browser; keep hsts false until a CA certificate is installed.",
   "_comment_headers": "blocked_* arrays are regular expressions matched against the whole header name, case-insensitively. Built-in hop-by-hop/security headers always apply.",
+  "_comment_cors": "cors_origins lists the exact http(s) origins allowed to call /proxy/ cross-origin, e.g. \"https://portal.example\". Use \"null\" for a file:// page or a sandboxed iframe; * is not accepted. Only list origins you trust as much as the portal itself. Once set, the proxy owns CORS and discards upstream Access-Control-* headers.",
   "host": "127.0.0.1",
   "port": 8443,
   "cert_file": "cert.pem",
@@ -17,6 +18,7 @@
   "hsts": false,
   "blocked_request_headers": [],
   "blocked_response_headers": [],
+  "cors_origins": [],
   "users": {
     "admin": "REPLACE_WITH_OUTPUT_OF_webvpn-server_hash-password"
   },

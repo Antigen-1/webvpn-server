@@ -281,9 +281,37 @@ def test_config():
         assert loaded["targets"][0]["name"] == "wiki"
         assert loaded["blocked_request_headers"] == ["x-secret-.*"]
         assert loaded["blocked_response_headers"] == ["x-private"]
+        assert loaded["cors_origins"] == []
         assert len(loaded["blocked_request_header_patterns"]) == 1
         assert loaded["blocked_request_header_patterns"][0].fullmatch("X-SECRET-TOKEN")
         config.check_config(loaded)
+
+        def load_with(origins):
+            candidate = dict(raw)
+            candidate["cors_origins"] = origins
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(candidate, stream)
+            return config.load_config(path)
+
+        cors = load_with([
+            "https://example.com/",
+            "http://127.0.0.1:3002",
+            "null",
+            "http://[::1]:8080",
+        ])
+        assert cors["cors_origins"] == [
+            "https://example.com",
+            "http://127.0.0.1:3002",
+            "null",
+            "http://[::1]:8080",
+        ]
+        raises(lambda: load_with(["*"]), "通配符")
+        raises(lambda: load_with(["https://example.com/app"]), "origin")
+        raises(lambda: load_with(["https://example.com?a=1"]), "origin")
+        raises(lambda: load_with(["https://user@example.com"]), "origin")
+        raises(lambda: load_with([" https://example.com"]), "空白")
+        raises(lambda: load_with(["https://example.com", "https://example.com/"]), "重复")
+        raises(lambda: load_with("https://example.com"), "cors_origins")
 
         config.apply_overrides(loaded, "0.0.0.0", 9443, None, None)
         assert loaded["host"] == "0.0.0.0" and loaded["port"] == 9443

@@ -15,6 +15,10 @@ hop-by-hop/security names always apply, and `blocked_request_headers` /
 `blocked_response_headers` add case-insensitive regular expressions matched
 against the whole header name.
 
+Cross-origin access to the authenticated proxy is off by default; the
+`cors_origins` array lists the exact origins whose preflights the proxy answers
+and whose responses may be read by a browser.
+
 ## Quick start
 
 ```sh

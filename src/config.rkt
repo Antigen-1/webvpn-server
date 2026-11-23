@@ -91,6 +91,8 @@
     (define max-targets 64)
     (define max-header-patterns 64)
     (define max-header-pattern-length 256)
+    (define max-cors-origins 32)
+    (define max-cors-origin-length 255)
 
     (define (config-error message)
       (raise (+ "配置错误: " message)))
@@ -312,6 +314,98 @@
                                       (+ strings (list pattern))
                                       (+ compiled (list compiled-pattern))))
 
+    ;; ---- origins allowed to call the proxy cross-origin
+    ;;
+    ;; A CORS preflight carries no session cookie, so a listed origin must be
+    ;; answered before the session check.  The session is still required for
+    ;; every actual request; the list only grants permission to read the reply.
+    ;; "null" is the opaque origin of a file:// page or a sandboxed iframe.
+
+    (define (default-scheme-port scheme)
+      (if (= scheme "https") 443 80))
+
+    (define (normalize-cors-origins raw)
+      (define value (raw-value raw "cors_origins" (list)))
+      (if (not (list-value? value))
+          (config-error "cors_origins 必须是 origin 字符串数组")
+          (if (> (len value) max-cors-origins)
+              (config-error (+ "cors_origins 最多 " (str max-cors-origins) " 项"))
+              (normalize-cors-origins-list value 0 (list) (dict)))))
+
+    (define (normalize-cors-origins-list value index result seen)
+      (if (>= index (len value))
+          result
+          (normalize-cors-origin-one value index result seen)))
+
+    (define (normalize-cors-origin-one value index result seen)
+      (define origin (normalize-cors-origin (object-ref value index) index))
+      (if (in origin seen)
+          (config-error (+ "cors_origins 第 " (str (+ index 1)) " 项重复: " origin))
+          (register-cors-origin value index result seen origin)))
+
+    (define (register-cors-origin value index result seen origin)
+      (object-set! seen origin #t)
+      (normalize-cors-origins-list value (+ index 1) (+ result (list origin)) seen))
+
+    (define (normalize-cors-origin value index)
+      (define prefix (+ "cors_origins[" (str index) "]"))
+      (if (not (text-value? value))
+          (config-error (+ prefix " 必须是字符串"))
+          (if (or (= (len value) 0)
+                  (not (equal? (text-strip value) value))
+                  (> (len value) max-cors-origin-length))
+              (config-error (+ prefix " 必须是非空、无首尾空白、最多 "
+                               (str max-cors-origin-length) " 个字符的字符串"))
+              (if (= value "null")
+                  "null"
+                  (normalize-cors-origin-url value prefix)))))
+
+    (define (normalize-cors-origin-url value prefix)
+      (if (= value "*")
+          (config-error "cors_origins 不支持通配符 *；请逐项列出可信 origin")
+          (normalize-cors-origin-parsed value prefix
+            (with-handler (lambda (e) None) (url-split value)))))
+
+    (define (normalize-cors-origin-parsed value prefix parsed)
+      (if (eq? parsed None)
+          (config-error (+ prefix " 不是合法的 origin"))
+          (normalize-cors-origin-fields value prefix parsed)))
+
+    (define (normalize-cors-origin-fields value prefix parsed)
+      (define scheme (text-lower (to-text (object-get-attr parsed "scheme"))))
+      (define netloc (to-text (object-get-attr parsed "netloc")))
+      (define path (to-text (object-get-attr parsed "path")))
+      (define query (to-text (object-get-attr parsed "query")))
+      (define fragment (to-text (object-get-attr parsed "fragment")))
+      (define raw-host (with-handler (lambda (e) None)
+                                     (object-get-attr parsed "hostname")))
+      (define invalid-port (list))
+      (define raw-port (with-handler (lambda (e) invalid-port)
+                                     (object-get-attr parsed "port")))
+      (if (or (not (or (= scheme "http") (= scheme "https")))
+              (= (len netloc) 0)
+              (text-contains? netloc "@")
+              (not (or (= path "") (= path "/")))
+              (> (len query) 0)
+              (> (len fragment) 0)
+              (not (text-value? raw-host))
+              (eq? raw-port invalid-port))
+          (config-error (+ prefix " 必须是 http(s) origin，不能带路径、查询、片段或账号"))
+          (normalize-cors-origin-port prefix scheme raw-host raw-port)))
+
+    (define (normalize-cors-origin-port prefix scheme raw-host raw-port)
+      (define port (if (eq? raw-port None) (default-scheme-port scheme) raw-port))
+      (if (or (not (integer-value? port)) (< port 1) (> port 65535))
+          (config-error (+ prefix " 的端口不合法"))
+          (cors-origin-text scheme raw-host port)))
+
+    (define (cors-origin-text scheme raw-host port)
+      (define host (text-lower raw-host))
+      (define host-text (if (text-contains? host ":") (+ "[" host "]") host))
+      (if (= port (default-scheme-port scheme))
+          (+ scheme "://" host-text)
+          (+ scheme "://" host-text ":" (str port))))
+
     ;; ---- the whole file
 
     (define (normalize-config raw config-path)
@@ -352,6 +446,7 @@
       (object-set! config "blocked_request_header_patterns" (object-ref request-patterns 1))
       (object-set! config "blocked_response_headers" (object-ref response-patterns 0))
       (object-set! config "blocked_response_header_patterns" (object-ref response-patterns 1))
+      (object-set! config "cors_origins" (normalize-cors-origins raw))
       (object-set! config "users" (normalize-users (raw-value raw "users" (dict))))
       (object-set! config "targets" (normalize-targets (raw-value raw "targets" (list))))
       (validate-host (object-ref config "host") config))
@@ -536,6 +631,7 @@
       (object-set! raw "hsts" #t)
       (object-set! raw "blocked_request_headers" (list))
       (object-set! raw "blocked_response_headers" (list))
+      (object-set! raw "cors_origins" (list))
       (define users (dict))
       (object-set! users "admin" encoded)
       (object-set! raw "users" users)

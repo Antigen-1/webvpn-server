@@ -22,6 +22,7 @@
     (define text-strip (object-get-attr util "text_strip"))
     (define text-join (object-get-attr util "text_join"))
     (define text-split (object-get-attr util "text_split"))
+    (define header-name? (object-get-attr util "header_name_p"))
     (define text-contains? (object-get-attr util "text_contains_p"))
     (define text-startswith? (object-get-attr util "text_startswith_p"))
     (define text-substr (object-get-attr util "text_substr"))
@@ -45,6 +46,7 @@
     (define content-security-policy
       "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
     (define proxy-methods (list "GET" "HEAD" "POST" "PUT" "PATCH" "DELETE" "OPTIONS"))
+    (define proxy-allow-methods "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
     (define max-form-body 8192)
     (define max-sessions 1024)
     (define session-cookie-name "webvpn_session")
@@ -342,7 +344,7 @@
                    " ip=" (client-ip app info)))
       (redirect-answer config "/login" (list (auth.clear-session-cookie))))
 
-    ;; ---- health and CORS-free options
+    ;; ---- health and generic OPTIONS
 
     (define (handle-health app info)
       (text-response-body (object-ref app "config") 200 "ok"
@@ -351,6 +353,76 @@
     (define (handle-options app info)
       (empty-answer (object-ref app "config") 204
                     (list (list "Allow" "GET, HEAD, POST, OPTIONS"))))
+
+    ;; ---- cross-origin proxy preflights
+
+    (define max-preflight-header-list 2048)
+    (define max-preflight-header-count 64)
+
+    (define (cors-configured? config)
+      (> (len (object-ref config "cors_origins")) 0))
+
+    (define (cors-origin config info)
+      (define origin (request-header info "origin"))
+      (if (none? origin)
+          None
+          (if (in origin (object-ref config "cors_origins")) origin None)))
+
+    (define (cors-response-headers config info)
+      (if (not (cors-configured? config))
+          (list)
+          (cors-response-headers-active config info)))
+
+    (define (cors-response-headers-active config info)
+      (define origin (cors-origin config info))
+      (if (none? origin)
+          (list (list "Vary" "Origin"))
+          (list (list "Access-Control-Allow-Origin" origin)
+                (list "Access-Control-Allow-Credentials" "true")
+                (list "Vary" "Origin"))))
+
+    (define (cors-error-answer config info status message)
+      ((object-get-attr bridge "html_response")
+       ((object-get-attr pages "error_page") status message) status
+       (+ (base-headers config #t) (cors-response-headers config info)) (list)))
+
+    (define (proxy-preflight? app info)
+      (and (= (to-text (object-ref info "method")) "OPTIONS")
+           (some? (request-header info "access-control-request-method"))
+           (some? (cors-origin (object-ref app "config") info))))
+
+    (define (handle-proxy-preflight app info)
+      (define config (object-ref app "config"))
+      (empty-answer config 204
+                    (+ (cors-response-headers config info)
+                       (list (list "Access-Control-Allow-Methods" proxy-allow-methods)
+                             (list "Access-Control-Max-Age" "600"))
+                       (preflight-allowed-headers info))))
+
+    (define (preflight-allowed-headers info)
+      (define value (request-header info "access-control-request-headers"))
+      (if (none? value)
+          (list)
+          (if (valid-requested-headers? value)
+              (list (list "Access-Control-Allow-Headers"
+                          (text-join ", " (requested-header-names value))))
+              (list))))
+
+    (define (requested-header-names value)
+      (map (lambda (part) (text-strip part)) (text-split value ",")))
+
+    (define (valid-requested-headers? value)
+      (define parts (text-split value ","))
+      (and (<= (len value) max-preflight-header-list)
+           (<= (len parts) max-preflight-header-count)
+           (header-names-valid? parts 0)))
+
+    (define (header-names-valid? parts index)
+      (if (>= index (len parts))
+          #t
+          (if (header-name? (text-strip (object-ref parts index)))
+              (header-names-valid? parts (+ index 1))
+              #f)))
 
     ;; ---- the proxy
 
@@ -370,25 +442,46 @@
     (define (proxy-error-answer config info failure)
       (define message (object-ref failure "error"))
       (cond
-        [(text-contains? message "路径") (error-answer config 400 "请求路径不合法")]
-        [(object-ref failure "timeout") (error-answer config 504 "上游站点响应超时")]
-        [(text-contains? message "max_response") (error-answer config 502 "上游站点响应过大")]
-        [else (error-answer config 502 "无法访问上游站点")]))
+        [(text-contains? message "路径") (cors-error-answer config info 400 "请求路径不合法")]
+        [(object-ref failure "timeout") (cors-error-answer config info 504 "上游站点响应超时")]
+        [(text-contains? message "max_response") (cors-error-answer config info 502 "上游站点响应过大")]
+        [else (cors-error-answer config info 502 "无法访问上游站点")]))
 
-    (define (proxy-answer config rewritten head?)
+    (define (proxy-answer config rewritten head? cors)
       (define body (object-ref rewritten "body"))
       (define status (object-ref rewritten "status"))
-      (define headers (+ (base-headers config #f) (object-ref rewritten "headers")))
+      (define upstream-headers (object-ref rewritten "headers"))
+      (define response-headers
+        (if (= (len cors) 0)
+            upstream-headers
+            (strip-upstream-cors upstream-headers 0 (list))))
+      (define headers (+ (base-headers config #f) cors response-headers))
       (define head-length
         (if head?
-            (header-int (object-ref rewritten "headers") "content-length")
+            (header-int upstream-headers "content-length")
             None))
       (if (some? head-length)
           ((object-get-attr bridge "response") body status headers (list)
                                               #:content_length head-length)
           ((object-get-attr bridge "response") body status headers (list))))
 
+    (define (strip-upstream-cors headers index result)
+      (if (>= index (len headers))
+          result
+          (strip-upstream-cors-one headers index result)))
+
+    (define (strip-upstream-cors-one headers index result)
+      (define header (object-ref headers index))
+      (if (text-startswith? (text-lower (object-ref header 0)) "access-control-")
+          (strip-upstream-cors headers (+ index 1) result)
+          (strip-upstream-cors headers (+ index 1) (+ result (list header)))))
+
     (define (handle-proxy app info body)
+      (if (proxy-preflight? app info)
+          (handle-proxy-preflight app info)
+          (handle-proxy-session app info body)))
+
+    (define (handle-proxy-session app info body)
       (define session (session-from-request app info))
       (if (none? session)
           (handle-proxy-unauthenticated app info)
@@ -400,7 +493,9 @@
       (if (or (= method "GET") (= method "HEAD"))
           (redirect-answer config (login-location info) (list))
           (text-response-body config 401 "authentication required"
-                              (list (list "WWW-Authenticate" "WebVPN")) (list))))
+                              (+ (cors-response-headers config info)
+                                 (list (list "WWW-Authenticate" "WebVPN")))
+                              (list))))
 
     (define (handle-proxy-authenticated app info body session)
       (define config (object-ref app "config"))
@@ -411,17 +506,17 @@
       (define rest (if (= slash -1) "" (text-substr after-prefix slash None)))
       (define target (proxy.target-by-name (object-ref app "index") name))
       (if (none? target)
-          (error-answer config 404 "没有这个内网站点")
+          (cors-error-answer config info 404 "没有这个内网站点")
           (if (= slash -1)
-              (proxy-canonical-redirect config name (to-text (object-ref info "query")))
+              (proxy-canonical-redirect config info name)
               (handle-proxy-target app info body target rest
                                (object-ref session "namespace")))))
 
-    (define (proxy-canonical-redirect config name query)
-      (redirect-answer-status config
-                              (+ "/proxy/" name "/"
-                                 (if (> (len query) 0) (+ "?" query) ""))
-                              308 (list)))
+    (define (proxy-canonical-redirect config info name)
+      (define query (to-text (object-ref info "query")))
+      ((object-get-attr bridge "redirect")
+       (+ "/proxy/" name "/" (if (> (len query) 0) (+ "?" query) ""))
+       308 (list) (+ (base-headers config #t) (cors-response-headers config info))))
 
     (define (substring-after text prefix)
       (if (text-startswith? text prefix)
@@ -434,7 +529,7 @@
         (with-handler (lambda (e) None)
                       (proxy.request-target target rest (to-text (object-ref info "query")))))
       (if (none? request-target)
-          (error-answer config 400 "请求路径不合法")
+          (cors-error-answer config info 400 "请求路径不合法")
           (handle-proxy-fetch app info body target request-target namespace)))
 
     (define (handle-proxy-fetch app info body target request-target namespace)
@@ -463,7 +558,8 @@
                                               (object-ref config "blocked_response_header_patterns"))))
       (if (in "error" rewritten)
           (proxy-error-answer config info rewritten)
-          (proxy-answer config rewritten head?)))
+          (proxy-answer config rewritten head?
+                        (cors-response-headers config info))))
 
     ;; ---- routing
 
@@ -487,7 +583,7 @@
         [(text-startswith? path "/proxy/")
          (if (in method proxy-methods)
              (handle-proxy app info body)
-             (method-not-allowed config "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"))]
+             (method-not-allowed config proxy-allow-methods))]
         [(= method "OPTIONS")
          (handle-options app info)]
         [(or (= path "/") (= path "/login") (= path "/healthz"))

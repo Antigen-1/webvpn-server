@@ -154,6 +154,11 @@ PBKDF2 哈希。@tt{check} 校验 JSON、用户哈希、target origin 与证书/
   @item{@tt{blocked_request_headers}、@tt{blocked_response_headers}（默认
         @tt{[]}）：正则表达式数组，用来扩展内置的请求/响应头黑名单。对完整头名
         做大小写不敏感匹配，例如 @tt{"x-internal-.*"}。}
+  @item{@tt{cors_origins}（默认 @tt{[]}）：允许跨域调用 @tt{/proxy/} 的
+        origin 数组，例如 @tt{"https://portal.example"}。只接受精确的
+        @tt{http(s)} origin（不带路径、查询、片段或账号）；@tt{"null"} 表示
+        file:// 页面或沙箱 iframe 的不透明 origin；不接受 @tt{"*"}。列入的
+        origin 可以获得带凭据的 CORS 响应，请只列与门户同等可信的 origin。}
   @item{@tt{users}：对象，键是用户名，值是 @tt{hash-password} 的输出。
         @tt{init} 会创建 @tt{admin}。}
   @item{@tt{targets}：数组，每项有 @tt{name}（匹配
@@ -200,6 +205,21 @@ PBKDF2 哈希。@tt{check} 校验 JSON、用户哈希、target origin 与证书/
 配置在加载时编译正则；非法正则、空字符串、超过 64 条或单条超过 256 个字符都会
 让 @tt{load-config} / @tt{check} 失败，而不是在请求时才报错。
 
+@subsection{CORS 跨域}
+
+默认不发送任何 CORS 响应头，跨域前端无法读取 @tt{/proxy/} 的响应。把前端
+origin 逐项写进 @tt{cors_origins} 后，代理对来自这些 origin 的预检在会话检查
+之前回答，并在实际响应上发送 @tt{Access-Control-Allow-Origin}（回声该
+origin）、@tt{Access-Control-Allow-Credentials: true} 和 @tt{Vary: Origin}。
+预检还会列出允许的方法、允许的请求头（回声浏览器请求的头名）和 600 秒缓存。
+
+会话仍然必需：预检之后，浏览器带 Cookie 的真实请求还要通过登录检查。一旦
+配置了 @tt{cors_origins}，代理就接管跨域策略：上游自己的
+@tt{Access-Control-*} 响应头一律丢弃，避免出现两个
+@tt{Access-Control-Allow-Origin}。没有列入的 origin 拿不到
+@tt{Access-Control-Allow-Origin}（未登录的预检仍是 @tt{401}），浏览器会按
+跨域失败处理；未配置该键时保持旧行为，上游 CORS 头照常转发。
+
 @section{Command line 命令行}
 
 @verbatim|{
@@ -235,7 +255,10 @@ webvpn-server hash-password
   @item{@tt{POST /logout}：需要会话和表单字段 @tt{csrf}；销毁服务端会话。}
   @item{@tt{GET /healthz}：不需要鉴权，返回 @tt{ok}，不泄露版本或配置。}
   @item{@tt{/proxy/<name>/...}：需要会话。支持 GET/HEAD/POST/PUT/PATCH/DELETE/
-        OPTIONS。没有结尾斜杠的 @tt{/proxy/<name>} 会 @tt{308} 到带斜杠的地址。}
+        OPTIONS。没有结尾斜杠的 @tt{/proxy/<name>} 会 @tt{308} 到带斜杠的地址。
+        来自 @tt{cors_origins} 中 origin 的 CORS 预检请求（@tt{OPTIONS} 带
+        @tt{Origin} 和 @tt{Access-Control-Request-Method}）在会话检查之前直接
+        返回 @tt{204}；其它的 @tt{OPTIONS} 仍按普通代理请求处理。}
   @item{@tt{/favicon.ico}：@tt{204}。}
 ]
 
@@ -299,7 +322,9 @@ webvpn-server hash-password
         优先使用根相对或绝对地址。}
   @item{HTML 的 @tt{meta refresh}、@tt{Link} 响应头、SVG @tt{xlink:href} 等位置
         没有专门重写；只有 @tt{Refresh} 响应头做了处理。}
-  @item{上游 CORS 头按原样转发，不按代理 origin 重写；跨域前端可能失败。}
+  @item{只有 @tt{cors_origins} 中列出的 origin 会得到代理重写的 CORS 响应；
+        配置该键后上游的 @tt{Access-Control-*} 头会被丢弃，未列出的跨域前端
+        拿不到 @tt{Access-Control-Allow-Origin}，浏览器会按跨域失败处理。}
   @item{代理不替内网站点做 CSRF 防护；内网应用仍需自己的 CSRF 机制。会话 Cookie
         是 @tt{SameSite=Lax}，跨站 POST 不会带上它，但 GET 副作用仍由内网应用负责。}
   @item{会话保存在单进程内存中，重启后所有用户需要重新登录；部署多个 worker

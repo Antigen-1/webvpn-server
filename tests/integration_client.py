@@ -76,7 +76,9 @@ class Upstream(BaseHTTPRequestHandler):
                 ("Location", f"http://127.0.0.1:{port}/root"),
             ])
         elif self.path == "/json":
-            self._send(200, b'{"ok":true}', "application/json")
+            self._send(200, b'{"ok":true}', "application/json", headers=[
+                ("Access-Control-Allow-Origin", "*"),
+            ])
         elif self.path == "/headers":
             data = json.dumps(dict(self.headers.items())).encode("utf-8")
             self._send(200, data, "application/json", headers=[("X-Private", "yes")])
@@ -194,6 +196,7 @@ def main():
         raw["max_response"] = 10000
         raw["blocked_request_headers"] = ["x-secret-.*"]
         raw["blocked_response_headers"] = ["x-private"]
+        raw["cors_origins"] = ["https://frontend.example"]
         raw["targets"] = [
             {"name": "up", "label": "内部测试站", "url": f"http://127.0.0.1:{upstream_port}"}
         ]
@@ -233,6 +236,38 @@ def main():
         assert response.status == 200
         assert response.getheader("server") is None
         assert response.getheader("date") is None
+
+        response, _, _ = client.request(
+            "OPTIONS", "/proxy/up/api",
+            headers={
+                "Origin": "https://frontend.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type, x-test",
+            },
+        )
+        assert response.status == 204
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
+        assert response.getheader("access-control-allow-credentials") == "true"
+        assert "POST" in response.getheader("access-control-allow-methods")
+        allowed = response.getheader("access-control-allow-headers").lower()
+        assert "content-type" in allowed and "x-test" in allowed
+        assert "origin" in response.getheader("vary").lower()
+
+        response, _, _ = client.request(
+            "OPTIONS", "/proxy/up/api",
+            headers={"Origin": "https://evil.example",
+                     "Access-Control-Request-Method": "POST"},
+        )
+        assert response.status == 401
+        assert response.getheader("access-control-allow-origin") is None
+
+        response, _, _ = client.request(
+            "POST", "/proxy/up/api", body=b"x",
+            headers={"Origin": "https://frontend.example"},
+        )
+        assert response.status == 401
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
+        assert response.getheader("access-control-allow-credentials") == "true"
 
         response, data, _ = client.request("GET", "/")
         assert response.status == 303
@@ -295,6 +330,13 @@ def main():
         assert response.status == 308
         assert response.getheader("location") == "/proxy/up/"
 
+        response, _, _ = client.request(
+            "GET", "/proxy/up", headers={"Origin": "https://frontend.example"},
+        )
+        assert response.status == 308
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
+        assert response.getheader("access-control-allow-credentials") == "true"
+
         response, data, _ = client.request("GET", "/proxy/up/")
         assert response.status == 200
         text = data.decode("utf-8")
@@ -328,6 +370,34 @@ def main():
         assert response.status == 200
         assert response.getheader("content-type") == "application/json"
         assert data == b'{"ok":true}'
+
+        cross_origin = {"Origin": "https://frontend.example"}
+        response, _, _ = client.request("GET", "/proxy/up/root", headers=cross_origin)
+        assert response.status == 200
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
+        assert response.getheader("access-control-allow-credentials") == "true"
+        assert "origin" in response.getheader("vary").lower()
+
+        response, _, _ = client.request("GET", "/proxy/up/json", headers=cross_origin)
+        assert response.status == 200
+        origins = [value for name, value in response.getheaders()
+                   if name.lower() == "access-control-allow-origin"]
+        assert origins == ["https://frontend.example"]
+
+        response, _, _ = client.request(
+            "GET", "/proxy/up/json", headers={"Origin": "https://other.example"},
+        )
+        assert response.status == 200
+        assert response.getheader("access-control-allow-origin") is None
+        assert response.getheader("vary") is not None
+
+        response, _, _ = client.request("GET", "/proxy/up/../etc", headers=cross_origin)
+        assert response.status == 400
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
+
+        response, _, _ = client.request("GET", "/proxy/nope/", headers=cross_origin)
+        assert response.status == 404
+        assert response.getheader("access-control-allow-origin") == "https://frontend.example"
 
         response, data, _ = client.request(
             "GET", "/proxy/up/headers",
